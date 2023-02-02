@@ -1,24 +1,19 @@
 /*
-* Renumber - aplicație care renumerotează fișierele create de CopyBook cu nume în ordinea în care au fost create fișierele la momentul scanării
-* version 0.2.0
-* January 2023
-* Aplicația acoperă doar cazul în care s-a corectat pe loc prin ștergere și creare de imagine în continuare.
-* Acest lucru înseamnă că timestamp-ul este un criteriu valid de ordonare.
-* Nu tratează cazul în care s-a revenit ulterior la o distanță în timp.
-* O versiune ulterioară trebuie să refacă structura din `mets:structMap` cu date din `mets:fileSec`
+* version 0.3.0
+* February 2023
 * Nicolaie Constantinescu, <kosson@gmail.com>
-* Pentru NIPNE, Biblioteca Națională de Fizică
 */
 
 const xml2js = require('xml2js');
 const fs = require('fs/promises');
 const globby = require('globby');
 const { stat, constants } = require('fs');
+const { Buffer } = require('node:buffer');
+const { Console } = require('console');
 
 // Îmi trebuie un hash {name: nume_fisier, path: cale relativă}
 // https://attacomsian.com/blog/nodejs-convert-xml-to-json
 // https://gist.github.com/sindresorhus/a39789f98801d908bbc7ff3ecc99d99c
-// let paths = globby(['./DOCS/**/*.mets']);
 
 try {
 
@@ -59,82 +54,47 @@ try {
                 };
             }
         } catch (error) {
-            throw new Error("A aparut o eroare la scrierea pe disc", error);
+            console.error(`A aparut o eroare la scrierea pe disc. Fișierul este ${source} `, error);
         }
     }
  
-    let xobject = new Set(); // structura care acumulează înregistrările (vin din `revealHref`) din care se creează array-ul
-
     /**
      * Este o funcție recursivă care are rolul de a prelucra obiectul ce reprezintă structura fișierului .mets
      * Populează Set-ul `xobject`
      * Toate proprietățile au drept valoare un array indiferent de datele care sunt acolo. Această structură o generează `xml2js`
      * @param {Object} obj este obiectul reprezentare a unui element XML
-     * @param {Object} state Obiectul va fi pasat imediat după ce returnează (invocare în `fileNameExtractor`)
-     * @param {Number} state.kontor este numărul de ordine care va fi atașat ultimul în formarea numelui noului fișier tif
-     * @param {String} state.created este data calendaristică la care a fost creat fișierul
-     * @param {String} state.path este calea fișierului care urmează a fi redenumit și scris pe disc în ./renumbered
      * @see fileNameExtractor
      */
-    async function revealHref (obj, state) {
-        let newRecord = {};
+     function revealHref (obj, state) {
 
-        // Prelucrează recursiv array-urile care sunt valorile cheilor
         if (Array.isArray(obj)) {
-            let elem;
-            for (elem of obj) {
-                revealHref(elem, state);
-            }
-        }
-
-        // cazul array de `fileGrp` a lui `fileSec` care are array-uri de `fileGrp` la rândul său
-        if (obj['mets:fileGrp'] != null) {
-            // dacă elementul conține un array, apelează recursiv și pasează starea
-            if (Array.isArray(obj['mets:fileGrp'])) {
-                revealHref(obj['mets:fileGrp'], state);
-            }
-        }
-        
-        // când ai găsit mets:file, trimite înregistrarea în `xobject`
-        if (obj['mets:file'] != null) {
-            let record; // folosit în for (pentru debug)
-            if (obj['mets:file'].length > 0) {
-                // cazul array-ului de fișiere
-                for (record of obj['mets:file']) {
-                    newRecord['created'] = record?.CREATED[0];   // completează obiectul state
-                    newRecord['groupid'] = record?.GROUPID[0];
-                    newRecord['id'] = record?.ID[0];
-                    let pathSegments = record['mets:FLocat'][0]['xlink:href'][0].split("\\");
-                    let nixPathRoot = `${pathSegments[0]}/DOCS/${pathSegments[1]}`;
-                    newRecord['dir'] = nixPathRoot;
-                    newRecord['path'] = `${nixPathRoot}/${pathSegments[2]}`;
-                    newRecord['record'] = record;
-                    state['kontor']++;          // incrementează contorul
-                    xobject.add(newRecord); // în `xobject`
+            let element;
+            for (element of obj) {
+                // cazul array de `fileGrp` a lui `fileSec` care are array-uri de `fileGrp` la rândul său
+                if (element['mets:fileGrp'] != null) {
+                    // dacă elementul conține un array, apelează recursiv și pasează starea
+                    if (Array.isArray(element['mets:fileGrp'])) {
+                        // console.log(JSON.stringify(obj['mets:fileGrp']));
+                        revealHref(element['mets:fileGrp'], state);
+                    }
                 }
-            } else {
-                newRecord['created'] = record?.CREATED[0];   // completează obiectul state
-                newRecord['groupid'] = record?.GROUPID[0];
-                newRecord['id'] = record?.ID[0];
-                let pathSegments = record['mets:FLocat'][0]['xlink:href'][0].split("\\");
-                let nixPathRoot = `${pathSegments[0]}/DOCS/${pathSegments[1]}`;
-                newRecord['dir'] = nixPathRoot;
-                newRecord['path'] = `${nixPathRoot}/${pathSegments[2]}`;
-                newRecord['record'] = record;
-                state['kontor']++;                      // incrementează contorulâ
-                xobject.add(newRecord); // în `xobject`
+
+                if (Array.isArray(element['mets:file'])) {
+                    for (let record of element['mets:file']) {
+                        // console.log(`Inregistrarea este `, record);
+                        record['created'] = record?.CREATED[0];   // completează obiectul state
+                        record['groupid'] = record?.GROUPID[0];
+                        record['id'] = record?.ID[0];
+                        let pathSegments = record['mets:FLocat'][0]['xlink:href'][0].split("\\");
+                        let nixPathRoot = `${pathSegments[0]}/DOCS/${pathSegments[1]}`;
+                        record['dir'] = nixPathRoot;
+                        record['path'] = `${nixPathRoot}/${pathSegments[2]}`;
+                        record['kontor'] = state['kontor']++; // incrementează contorul
+                        state?.data.push(record);
+                    }
+                }
             }
-            // console.log(`Obiectul stare este `, state);
-        }
 
-        // setează valoarea `state.created` din obiectul `state` 
-        if (obj['CREATED'] != null) {
-            newRecord['created'] = obj['CREATED'][0];             
-        }
-
-        // este cazul unei chei mets:FLocat, deci prelucrează recursiv
-        if (obj['mets:FLocat'] != null) {
-            revealHref(obj['mets:FLocat'], state);
         }
         
         return state;
@@ -156,49 +116,53 @@ try {
      */
     async function fileNameExtractor (path) {
 
-        console.log(`Calea adăugată pentru prelucrare este: `, path);
+        try {
+            const xml = await fs.readFile(path); // citește .mets
+            let result = await xml2js.parseStringPromise(xml, { mergeAttrs: true }); // creeează o reprezentare obiect a XML
+            let representation = result['mets:mets']['mets:structMap'];
+            // în cazul în care ai o proprietate `mets:fileSec` în rădăcină
+            if (result['mets:mets']['mets:fileSec']) {
 
-        const xml = await fs.readFile(path); // citește .mets
-        let result = await xml2js.parseStringPromise(xml, { mergeAttrs: true }); // creeează o reprezentare obiect a XML
-        
-        // în cazul în care ai o proprietate `mets:fileSec` în rădăcină
-        if (result['mets:mets']['mets:fileSec']) {
-            await revealHref(result['mets:mets']['mets:fileSec'], {
-                kontor:  0
-            }); // prelucrează recursiv reprezentarea obiect pentru a popula `xobject`
+                let records = revealHref(result['mets:mets']['mets:fileSec'], {
+                    kontor:  0,
+                    data: []
+                }); // prelucrează recursiv reprezentarea obiect
 
-            // creează un array în care sortezi obiectele după data la care au fost create fișierele
-            // Set-ul xobject conține obiecte pentru fiecare cale de fișier din fiecare subdirector. 
+                // creează un array în care sortezi obiectele după data la care au fost create fișierele
 
-            let filteredByCreation = [...xobject].map((obj) => {
-                return new Date(obj.created).valueOf();
-            }).sort((d1, d2) => {
-                return new Date(d1).valueOf() - new Date(d2).valueOf();
-            });
+                let filteredByCreation = records?.data.sort((a, b) => {
+                    // return new Date(d1).valueOf() - new Date(d2).valueOf();
+                    return a.created > b.created ? 1 : a.created < b.created ? -1 : 0;
+                }).map((obj, idx) => {
+                    obj['idx'] = idx;
+                    return obj;
+                });
 
-            // injectezi o proprietate nouă `idx` obiectelor pe care îl faci apendice la numele nou al fișierului
-            let obiRec;
-            for (obiRec of [...xobject]) {
-                let timestamp = new Date(obiRec.created).valueOf();
+                // Creează raportul ca fișier CSV în /renumbered
+                let report = `"idxarr", "timestamp", "created", "groupid", "id", "path" \n`;
+                let loggedTable = filteredByCreation.map((obiRec, idx) => {
+                    return `"${idx}","${new Date(obiRec.created).valueOf()}", "${obiRec.created}", "${obiRec.groupid}","${obiRec.id}","${obiRec.path}"`;
+                }).join("\n");
+                let fileContent = report+=loggedTable;
 
-                if (filteredByCreation.includes(timestamp)) {
-                    // introdu proprietatea `idx` cu valoarea poziției din array-ul sortat
-                    xobject.delete(obiRec);
-                    obiRec['idx'] = filteredByCreation.indexOf(timestamp);
-                    obiRec['timestamp'] = timestamp;
-                    xobject.add(obiRec);
-                }
+                let destinationPath = filteredByCreation[0].dir;
+                let reportFileNameBit = destinationPath.split('/')[2];
+                let reportFileName = 'log_' + reportFileNameBit.split(' ').join('_');
+
+                // Asigură-te că există subdirectorul
+                await ensureDir(`${filteredByCreation[0].dir}/renumbered`);
+                // Creează un Buffer
+                const data = new Uint8Array(Buffer.from(fileContent));
+                // Scrie Buffer-ul pe disc
+                await fs.writeFile(`${filteredByCreation[0].dir}/renumbered/${reportFileName}.csv`, data);
+
+                // declanșează procesul de copiere și redenumire.
+                filteredByCreation.forEach(processRecord);
+            } else {
+                console.log('File Sequence nu este găsit');
             }
-
-            // for (obiRec of xobject) {
-            //     console.log(`ACUM: `, obiRec);
-            // }
-
-            xobject.forEach(processRecord);
-
-            xobject.clear();
-        } else {
-            console.log('File Sequence nu este găsit');
+        } catch (error) {
+            console.error(error);
         }
     }
 
@@ -206,7 +170,8 @@ try {
      * Funcția face prelucrarea fiecărui fișier în parte
     */
     async function processRecord (obj) {
-        let {timestamp, dir, path, record, idx} = obj;
+        let {created, dir, path, idx} = obj;
+        let timestamp = new Date(created).valueOf();
         let targetSubdir = `${dir}/renumbered`;
         await ensureDir(targetSubdir); // asigură-te că există subdirectorul în care scrii
         await writeTheFile(path, `${targetSubdir}/${timestamp}_${idx}.tif`); // copiază și redenumește fișierul  
